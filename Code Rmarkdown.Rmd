@@ -1,0 +1,260 @@
+---
+title: "TP1-VaR Estimation and Backtesting with GARCH(1,1)-Normal"
+author: "Mazidath Imorou, Lijin Gao, Aida Diop"
+output:
+  word_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 5
+)
+```
+
+# Introduction
+
+L’objectif de ce projet est d’estimer et de tester la performance de la Value-at-Risk (VaR) à l’aide d’un modèle GARCH(1,1) avec erreurs normalement distribuées. Les rendements financiers étant caractérisés par une volatilité variable dans le temps, le cadre GARCH permet de modéliser efficacement l’hétéroscédasticité conditionnelle et les phénomènes de clustering de volatilité observés sur les marchés financiers.
+
+Les rendements logarithmiques de deux indices boursiers sont calculés et leurs volatilités conditionnelles sont estimées à l’aide d’un modèle GARCH(1,1). À partir de ces estimations, des prévisions de VaR à un pas en avant sont obtenues au niveau de confiance de 95 %. La performance des prévisions est évaluée au moyen d’un backtesting basé sur une fenêtre glissante de taille fixe.
+
+
+# Step: Data Preparation
+
+Dans cette section, nous chargerons l'ensemble de données `indices.rda`, conservons les observations à partir de Janvier 2005 et calculons les rendements logarithmiques pour les deux indices financiers.
+
+```{r echo=FALSE}
+# Nettoyons l'espace de travail pour garantir un environnement propre
+rm(list = ls())
+
+# Charger les packages qu on utilisera 
+library(here)                 # pour gerer les chemins de fichiers  
+library(xts)                  # pour manipuler des series temporelles financieres 
+library("PerformanceAnalytics")
+
+# Charger l'ensemble de données des indices financiers
+load(here("Data", "indices.rda"))
+
+# Examiner la classe et la structure des données de prix
+class(prices)
+
+
+cat("\nStructure des prix :\n")
+str(prices)
+
+cat("\nPremieres observations:\n")
+head(prices)
+
+
+
+# On conserve que les observations à partir de janvier 2005
+prices <- prices["2005-01/"]
+
+# Analyse de l'évolution des indices à partir de 2005.
+plot(prices, 
+     type = "l",
+     yaxis.right = FALSE,
+     legend.loc = "topleft",
+     major.ticks = "years",  # Afficher les ticks majeurs sur les années
+     minor.ticks = NULL,   # Ne pas afficher les ticks mineurs
+     main = "Indices SP 500 and FTSE 100",
+     grid.ticks.on = "years",   # Afficher les ticks de la grille sur les années
+     grid.ticks.lty = 2)
+
+
+cat("\nPériode d'échantillonnage après filtrage:\n")
+cat("Date de début :", as.character(index(prices)[1]), "\n")
+cat("Date de fin   :", as.character(index(prices)[nrow(prices)]), "\n")
+cat("Nombre total d'observations:", nrow(prices), "\n")
+
+# Calculer les rendements logarithmiques
+rets <- CalculateReturns(prices, method = "log")
+rets <- rets[-1] # Remove first NA observation created by differencing
+head(rets)
+
+# Configurez une disposition à 2 panneaux
+par(mfrow = c(2, 1), mar = c(4, 4, 3, 1))
+
+# SP500: Retours logarithmiques
+plot(rets[, 1],
+     main = "Log-Returns — SP500",
+     ylab = "Log-Return",
+     xlab = "Time",
+     col  = "steelblue")
+
+# FTSE100: Retours logarithmiques 
+plot(rets[, 2],
+     main = "Log-Returns — FTSE100",
+     ylab = "Log-Return",
+     xlab = "Time",
+     col  = "darkred")
+
+par(mfrow = c(1, 1))
+
+
+```
+
+**Interprétation: Les figures présentent l’évolution des rendements logarithmiques des indices S&P500 et FTSE100 entre 2005 et 2013. Dans les deux cas, les rendements oscillent autour de zéro, ce qui est typique des séries de rendements financiers. On observe également des périodes de forte volatilité, en particulier autour de la crise financière de 2008–2009, où les fluctuations deviennent beaucoup plus importantes. Ces graphiques mettent en évidence le phénomène de volatility clustering, caractéristique des marchés financiers, ce qui justifie l’utilisation d’un modèle GARCH pour modéliser la volatilité.**
+
+
+---
+
+# Step : Estimation du modèle. GARCH(1,1) 
+> - `f_ht()` calcule la séquence des variances conditionnelles $\sigma_t^2$. 
+> - `f_nll()` évalue la log-vraisemblance négative utilisée dans l'optimisation. 
+> - `f_forecast_var()` combine les deux et renvoie la prévision de la VaR à un pas.
+
+```{r source-functions}
+# Sourcez le fichier externe contenant les trois fonctions GARCH
+source(here("Function", "f_forecast_var.R"))
+```
+
+Le modèle GARCH(1,1) est défini comme : 
+
+$$y_t = \sigma_t \varepsilon_t, \quad \varepsilon_t \overset{iid}{\sim} \mathcal{N}(0,1)$$
+où la variance conditionnelle évolue selon
+
+$$\sigma_t^2 = \omega + \alpha y_{t-1}^2 + \beta \sigma_{t-1}^2$$
+
+avec contrainte de stationnarité $\alpha + \beta < 1$.
+
+
+Étape : Prévision de la VaR
+
+> **Question:**  En utilisant les premiers $T = 1000$ rendements logarithmiques, quelle est la VaR à 95 % à un pas pour chaque indice ? 
+> La VaR au niveau de risque $\gamma$ est donnée par :
+> 
+> $$\text{VaR}_{T+1} = \Phi^{-1}(1 - \gamma) \cdot \hat{\sigma}_{T+1}
+
+
+```{r}
+# Définir la fenêtre d'estimation et le niveau de risque
+T     <- 1000
+level <- 0.95
+
+# Extraire les T premières observations pour chaque indice sous forme de vecteurs numériques.
+y_SP500   <- as.numeric(rets$SP500[1:T])
+y_FTSE100 <- as.numeric(rets$FTSE100[1:T])
+
+# Estimer le modèle GARCH(1,1) et calculer la VaR à un pas.
+res_SP500   <- f_forecast_var(y_SP500,   level)
+res_FTSE100 <- f_forecast_var(y_FTSE100, level)
+
+# Extraire les prévisions de VaR
+VaR_SP500 <- res_SP500$VaR_Forecast
+VaR_FTSE  <- res_FTSE100$VaR_Forecast
+
+# Afficher les résultats
+
+cat(sprintf("• SP500   : %.6f\n", VaR_SP500))
+cat(sprintf("• FTSE100 : %.6f\n", VaR_FTSE))
+
+# Step : Backtesting
+
+T        <- 1000
+level    <- 0.95
+n        <- nrow(rets)
+n_forecast <- 1000  # 1 000 jour suivant 
+
+ "Initialize storage vectors"
+VaR_roll_SP500  <- numeric(n_forecast)
+VaR_roll_FTSE   <- numeric(n_forecast)
+
+" Rolling window loop "
+for (i in 1:n_forecast) {
+  # Extraire une fenêtre roulante de taille T
+  window_SP500 <- rets[i:(i + T - 1), 1]
+  window_FTSE  <- rets[i:(i + T - 1), 2]
+  
+# Estimer le modèle GARCH et prévoir la VaR de la prochaine étape
+  VaR_roll_SP500[i] <- f_forecast_var(as.numeric(window_SP500), level)$VaR_Forecast
+  VaR_roll_FTSE[i]  <- f_forecast_var(as.numeric(window_FTSE),  level)$VaR_Forecast
+}
+
+```
+**Interprétation：Les résultats montrent que la VaR à 95 % estimée à partir du modèle GARCH(1,1) est d’environ -0.069 pour le S&P500 et -0.062 pour le FTSE100. Cela signifie qu’avec un niveau de confiance de 95 %, la perte journalière ne devrait pas dépasser environ 6–7 % dans des conditions normales de marché. La VaR du S&P500 est légèrement plus élevée en valeur absolue, ce qui suggère un niveau de risque légèrement supérieur pour cet indice sur la période considérée. **
+
+```{r}
+
+# Rendements réalisés pour la période hors échantillon (prévisions T+1 à T+n)
+realized_SP500 <- as.numeric(rets[(T + 1):(T + n_forecast), 1])
+realized_FTSE  <- as.numeric(rets[(T + 1):(T + n_forecast), 2])
+
+# Dates de la période hors échantillon
+dates_oos <- index(rets)[(T + 1):(T + n_forecast)]
+
+# Convertir en xts pour le tracé
+VaR_xts_SP500  <- xts(VaR_roll_SP500,  order.by = dates_oos)
+VaR_xts_FTSE   <- xts(VaR_roll_FTSE,   order.by = dates_oos)
+ret_xts_SP500  <- xts(realized_SP500,   order.by = dates_oos)
+ret_xts_FTSE   <- xts(realized_FTSE,    order.by = dates_oos)
+
+#TRACER ET ENREGISTRER AU FORMAT PNG
+
+par(mfrow = c(1, 1), mar = c(4, 4, 3, 2))
+
+# SP500
+plot(ret_xts_SP500,
+     main = "Backtesting VaR 95% - SP500",
+     ylab = "Log-Return",
+     col  = "black", lwd = 0.8)
+lines(VaR_xts_SP500, col = "red", lwd = 1.5)
+legend("bottomleft",
+       legend = c("Realized Returns", "VaR 95%"),
+       col = c("black", "red"), lty = 1, bty = "n")
+
+# FTSE100
+plot(ret_xts_FTSE,
+     main = "Backtesting VaR 95% - FTSE100",
+     ylab = "Log-Return",
+     col  = "black", lwd = 0.8)
+lines(VaR_xts_FTSE, col = "red", lwd = 1.5)
+legend("bottomleft",
+       legend = c("Realized Returns", "VaR 95%"),
+       col = c("black", "red"), lty = 1, bty = "n")
+```
+
+**Interpretation：La figure présente le backtesting de la VaR à 95 % estimée à l’aide d’un modèle GARCH(1,1). La courbe noire représente les rendements observés et la courbe rouge la VaR estimée. La VaR varie dans le temps et augmente lors des périodes de forte volatilité. La plupart des rendements restent au-dessus de la VaR, tandis que quelques observations seulement passent en dessous, ce qui correspond aux violations de la VaR. Ces résultats suggèrent que le modèle capture correctement la dynamique du risque.**
+  
+  
+```{r}
+  
+# ENREGISTRER LES RÉSULTATS DES RETOURS DE CONTRÔLE AU FORMAT .rda
+
+# Indicateur de violation : 1 si le rendement réalisé est inférieur à la VaR (la VaR est négative dans ce cas).
+violations_SP500 <- as.integer(realized_SP500 < VaR_roll_SP500)
+violations_FTSE  <- as.integer(realized_FTSE  < VaR_roll_FTSE)
+
+
+# Collectez tous les résultats
+backtest_results <- list(
+  dates            = dates_oos,
+  realized_SP500   = realized_SP500,
+  realized_FTSE    = realized_FTSE,
+  VaR_SP500        = VaR_roll_SP500,
+  VaR_FTSE         = VaR_roll_FTSE,
+  violations_SP500 = violations_SP500,
+  violations_FTSE  = violations_FTSE
+)
+
+save(backtest_results, file = here("Data", "backtest_results.rda"))
+
+```
+**Interprétation：Afin d’évaluer la performance des prévisions de VaR, un indicateur de violation est défini. Une violation se produit lorsque le rendement observé est inférieur à la VaR estimée. Les violations sont calculées pour les indices S&P500 et FTSE100 sur la période hors échantillon. L’ensemble des résultats du backtesting, incluant les dates, les rendements réalisés, les VaR estimées et les indicateurs de violation, est ensuite stocké dans un fichier .rda afin de faciliter l’analyse ultérieure.**
+
+**Conclusion： Dans ce projet, nous avons analysé les rendements logarithmiques des indices S&P500 et FTSE100 et estimé leur volatilité conditionnelle à l’aide d’un modèle GARCH(1,1). Les résultats empiriques montrent que les rendements financiers présentent des périodes de forte volatilité, en particulier autour de la crise financière de 2008, ce qui confirme la présence de volatility clustering observée sur les marchés financiers.À partir des estimations du modèle, nous avons calculé la Value-at-Risk (VaR) à 95 % et effectué un exercice de backtesting avec une fenêtre glissante. Les résultats indiquent que la VaR varie dans le temps et s’adapte aux changements de volatilité du marché. Dans l’ensemble, les rendements observés restent majoritairement au-dessus du seuil de VaR, avec un nombre limité de violations, ce qui suggère que le modèle GARCH(1,1) fournit une estimation raisonnable du risque pour les deux indices.Ainsi, cette approche constitue un outil pertinent pour modéliser la volatilité et mesurer le risque de marché dans les séries financières.**
+
